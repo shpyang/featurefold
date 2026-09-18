@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     defaults:
       run:
-        working-directory: ./featurefold  # 👈 Tells GitHub to look inside your folder
+        working-directory: ./featurefold
     steps:
       - uses: actions/checkout@v4
 
@@ -40,9 +40,10 @@ jobs:
           path: |
             ~/.buildozer
             ~/.gradle
-          # 👈 Fixed the path inside hashFiles to locate the spec file properly
-          key: bz-${{ hashFiles('featurefold/buildozer.spec') }}
-          restore-keys: bz-
+          # Fixed: Added a hardcoded fallback string so the key input is never empty
+          key: bz-cache-${{ hashFiles('featurefold/buildozer.spec') || 'default' }}
+          restore-keys: |
+            bz-cache-
 
       - name: Build APK
         run: buildozer --verbose android debug
@@ -50,4 +51,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: featurefold-apk
-          path: featurefold/bin/*.apk  # 👈 Updated path to match the subfolder
+          path: featurefold/bin/*.apk
