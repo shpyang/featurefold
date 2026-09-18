@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: ./featurefold
     steps:
       - uses: actions/checkout@v4
 
@@ -15,7 +18,7 @@ jobs:
         with:
           python-version: "3.10"
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
@@ -23,18 +26,29 @@ jobs:
       - name: Host build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libffi-dev pkg-config autoconf automake libtool build-essential
+          sudo apt-get install -y libffi-dev pkg-config autoconf automake libtool lld libssl-dev build-essential
 
       - name: Install buildozer
-        run: pip install numpy matplotlib buildozer cython==0.29.36
+        run: pip install numpy matplotlib buildozer cython
 
       - name: Bake level assets (also runs the scorer gates)
         run: python bake_assets.py
 
+      - name: Cache SDK/NDK/Gradle between runs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle
+          # Fixed: Replaced dynamic hash with a reliable static key string
+          key: buildozer-android-global-cache
+          restore-keys: |
+            buildozer-android-global-cache
+
       - name: Build APK
-        run: yes | buildozer --verbose android debug
+        run: buildozer --verbose android debug
 
       - uses: actions/upload-artifact@v4
         with:
           name: featurefold-apk
-          path: bin/*.apk
+          path: featurefold/bin/*.apk
