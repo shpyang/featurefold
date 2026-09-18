@@ -1,0 +1,7 @@
+.buildozer/
+bin/
+__pycache__/
+*.apk
+*.aab
+*.patch
+level_*.npz
