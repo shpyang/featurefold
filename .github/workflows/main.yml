@@ -40,10 +40,7 @@ jobs:
           path: |
             ~/.buildozer
             ~/.gradle
-          # Fixed: Replaced dynamic hash with a reliable static key string
-          key: buildozer-android-global-cache
-          restore-keys: |
-            buildozer-android-global-cache
+          key: buildozer-apk-static-cache-key-v1
 
       - name: Build APK
         run: buildozer --verbose android debug
