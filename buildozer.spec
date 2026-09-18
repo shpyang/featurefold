@@ -18,6 +18,8 @@ icon.filename = icon.png
 presplash.filename = presplash.png
 android.release_artifact = aab
 p4a.branch = v2024.01.21 
+android.accept_sdk_license = True
+
 
 [buildozer]
 log_level = 2
