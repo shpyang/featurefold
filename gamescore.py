@@ -158,14 +158,28 @@ def oracle_fac(F, H, W, pairs):
             fac[i] = next(rest)
     return fac
 
+def _check_placement(fac, F):
+    """Placed features must be unique and in range — catches feature/cell-id
+    conflation (the v2.2 worst_fac bug that duplicated the hidden pair)."""
+    placed = np.asarray(fac)
+    placed = placed[placed >= 0]
+    assert len(np.unique(placed)) == len(placed), \
+        f"duplicate feature placement: {placed}"
+    assert placed.max() < F, "feature id out of range"
+
+
 def worst_fac(F, H, W, pairs):
     """Anti-oracle: every interaction pair placed at (greedy) maximal
     Chebyshev distance; remaining features fill the rest in order.
-    Deterministic.  On 4x4 all pairs land at distance 3."""
+    v2.2 FIX: track used CELLS and used FEATURES in separate sets -- the
+    previous version filtered features by cell ids, which (when the pair
+    ids differed from the greedy cell ids) duplicated the pair features
+    elsewhere on the board, accidentally re-adding the interaction product
+    and collapsing xor_16's sensitivity to ~0."""
     fac = -np.ones(H * W, int)
-    used = set()
+    used_cells, used_feats = set(), set()
     for a, b in pairs:
-        free = [i for i in range(H * W) if i not in used]
+        free = [i for i in range(H * W) if i not in used_cells]
         best = None
         for ii, i in enumerate(free):
             r1, c1 = divmod(i, W)
@@ -176,12 +190,15 @@ def worst_fac(F, H, W, pairs):
                     best = (d, i, j)
         _, i, j = best
         fac[i], fac[j] = a, b
-        used |= {i, j}
-    rest = iter(f for f in range(F) if f not in used)
+        used_cells |= {i, j}
+        used_feats |= {a, b}
+    rest = iter(f for f in range(F) if f not in used_feats)
     for i in range(H * W):
         if fac[i] < 0:
             fac[i] = next(rest)
+    _check_placement(fac, F)
     return fac
+ 
 # ------------------------------------------------------------------ scorer
 def make_design(Z, fac, H, W, use_products=True):
     """v1 scorer (4-neighborhood adjacent products); kept for the
