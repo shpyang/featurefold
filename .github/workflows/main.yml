@@ -1,20 +1,17 @@
 name: android-apk
-
 on:
-  workflow_dispatch:          # "Run workflow" button in the Actions tab
+  workflow_dispatch:
   push:
-    tags: ['v*']              # git tag v0.1.0 && git push origin v0.1.0
+    tags: ['v*']
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -23,27 +20,40 @@ jobs:
       - name: Host build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libffi-dev pkg-config autoconf automake libtool lld libssl-dev build-essential
+          sudo apt-get install -y libffi-dev pkg-config autoconf automake \
+            libtool lld libssl-dev build-essential
 
-      - name: Install buildozer
-        run: pip install numpy matplotlib buildozer cython
+      - name: Install buildozer (pinned — cython<3 breaks kivy recipes)
+        run: pip install "buildozer==1.5.0" "cython<3.0.0" numpy
 
-      - name: Bake level assets (also runs the scorer gates)
+      - name: Bake level assets (runs all gates; fails the job on failure)
         run: python bake_assets.py
 
-      - name: Cache SDK/NDK/Gradle between runs
+      - name: Cache SDK/NDK/Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.buildozer
             ~/.gradle
-          key: buildozer-apk-static-cache-key-v1
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-v2
+          restore-keys: buildozer-v2
 
       - name: Build APK
-        run: buildozer --verbose android debug
+        run: |
+          buildozer --verbose android debug
+          echo "--- bin/ contents ---"
+          ls -lh bin/ || true
+
+      - name: Fail loudly if no APK was produced
+        run: |
+          if ! compgen -G "bin/*.apk" > /dev/null; then
+            echo "::error::buildozer produced no APK. Scroll up to the"
+            echo "::error::'Build APK' log and search for 'BUILD FAILED'."
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: featurefold-apk
-          path: bin/*.aab
-                bin/*.apk
+          path: bin/*.apk
+          if-no-files-found: error
