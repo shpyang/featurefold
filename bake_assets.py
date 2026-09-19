@@ -1,84 +1,127 @@
-"""bake_assets.py — bake the shipped level files, then gate the shipped artifact.
-Run:  python bake_assets.py"""
-import os
+"""bake_assets.py — deterministic level baking + ALL gates.  v2
+CI USAGE: python bake_assets.py        (bake + run every gate; exit 1 on fail)
+          python bake_assets.py --verify   (reload npz + re-run gates only)
+
+Gates per level:
+  G1 scorer_gate           referee separates adjacent/anti XOR pair (r=0 ctrl flat)
+  G2 blindness_gate        blind surrogate cannot find interaction pairs
+     reveal_gate           ... or, for 'reveal' levels, MUST find them
+  G3 level_sensitivity_gate  paired referee diff on the LEVEL's own data
+  G4 interaction_budget    upper bound on layout signal (gap >= 0.02)
+  G5 invariance_check      pixels-only referee is layout-invariant
+"""
+import json
+import sys
+
 import numpy as np
-import gamescore
-from gamescore import (make_game_data, make_xor_data, split_scale,
-                       Surrogate, accuracy, load_level)
 
-HERE = os.path.dirname(os.path.abspath(gamescore.__file__))
+from gamescore import (LEVEL_TAGS, LEVELS, LEVEL_FMT, generate_level,
+                       load_level, scorer_gate, blindness_gate, reveal_gate,
+                       level_sensitivity_gate, interaction_budget,
+                       invariance_check, split_scale)
 
-def place_features(fixed):                       # fixed: {cell: feature_id}
-    fac = -np.ones(16, int)
-    for cell, f in fixed.items(): fac[cell] = f
-    pool = [f for f in range(16) if f not in set(fixed.values())]
-    it = iter(pool)
-    for i in range(16):
-        if fac[i] < 0: fac[i] = next(it)
-    return fac
+HARD = {"scorer", "blindness", "reveal", "sensitivity", "invariance"}
 
-def domino_layouts(pairs):
-    """best: every planted pair side-by-side (cells 4k, 4k+1)
-    worst: every planted pair split across its row (cells 4k, 4k+3).
-    Exactly 4 synergy pairs co-visible vs exactly 0 — the level's full skill range."""
-    best, worst = -np.ones(16, int), -np.ones(16, int)
-    pool = [f for f in range(16) if f not in {x for p in pairs for x in p}]
-    for k, (a, b) in enumerate(pairs):
-        best[4*k], best[4*k+1] = a, b
-        worst[4*k], worst[4*k+3] = a, b
-    bi = wi = 0
-    for i in range(16):
-        if best[i] < 0:  best[i]  = pool[bi]; bi += 1
-        if worst[i] < 0: worst[i] = pool[wi]; wi += 1
-    return best, worst
 
-def bake(tag, X, y, pairs=None):
-    trX, trY, vaX, vaY = split_scale(X, y)
-    sur = Surrogate(trX, trY)
-    payload = dict(trX=trX, trY=trY, vaX=vaX, vaY=vaY, imp=sur.imp, syn=sur.syn)
-    if pairs is not None: payload["pairs"] = np.array(pairs)   # gate reads these back
-    np.savez_compressed(os.path.join(HERE, f"level_{tag}.npz"), **payload)
-    print(f"level_{tag}.npz  train={trX.shape}  val={vaX.shape}")
+def _path(tag):
+    import os
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        f"level_{tag}.npz")
 
-def make_icons():
-    try:
-        import matplotlib; matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
-    except ImportError:
-        raise SystemExit("matplotlib needed once for icon.png/presplash.png "
-                         "(buildozer requires them); pip install matplotlib")
-    for name, px in (("icon.png", 512), ("presplash.png", 1024)):
-        fig, ax = plt.subplots(figsize=(px/100, px/100), dpi=100)
-        fig.patch.set_facecolor("#0d0f16"); ax.set_facecolor("#0d0f16")
-        ax.set_xlim(0, 4); ax.set_ylim(0, 4); ax.axis("off")
-        hot = {(0, 0): "#3fb950", (0, 1): "#3fb950"}
-        for r in range(4):
-            for c in range(4):
-                ax.add_patch(Rectangle((c+0.06, 3-r+0.06), 0.88, 0.88,
-                             fc=hot.get((r, c), "#232735"), ec="#3a3f52"))
-        fig.savefig(name, dpi=100); plt.close(fig); print(name)
+
+def bake(tag, verbose=True):
+    lvl = generate_level(tag)
+    fails = []
+
+    g1 = scorer_gate()
+    if verbose:
+        print(f"  G1 scorer_gate   : {'PASS' if g1['ok'] else 'FAIL'}"
+              f"  (referee d={g1['referee']['mean_diff']:+.3f}, "
+              f"control d={g1['pixels_only_control']['mean_diff']:+.4f})")
+    if not g1["ok"]:
+        fails.append("scorer")
+
+    if lvl["gated"]:
+        g2 = blindness_gate(lvl["sur"], lvl["F"], lvl["H"], lvl["W"],
+                            lvl["pairs"])
+        name = "G2 blindness"
+    else:
+        g2 = reveal_gate(lvl["sur"], lvl["F"], lvl["H"], lvl["W"],
+                         lvl["pairs"])
+        name = "G2 reveal"
+    if verbose:
+        print(f"  {name:<16s}: {'PASS' if g2['ok'] else 'FAIL'}"
+              f"  (z={g2['z']:+.2f})")
+    if not g2["ok"]:
+        fails.append(name.split()[1])
+
+    g3 = level_sensitivity_gate(lvl)
+    if verbose:
+        r = g3["diff"]
+        print(f"  G3 sensitivity   : {'PASS' if g3['ok'] else 'FAIL'}"
+              f"  (paired d={r['mean_diff']:+.3f}, "
+              f"CI {r['ci'][0]:+.3f}..{r['ci'][1]:+.3f})")
+    if not g3["ok"]:
+        fails.append("sensitivity")
+
+    g4 = interaction_budget(lvl["X"], lvl["y"])
+    if verbose:
+        print(f"  G4 inter-budget  : gap={g4['gap']:+.3f} -> {g4['verdict']}")
+    if g4["gap"] < 0.02:
+        fails.append("interaction_budget")
+
+    trX, trY, vaX, vaY = split_scale(lvl["X"], lvl["y"],
+                                     seed=lvl["version"])
+    g5 = invariance_check(trX, trY, vaX, vaY, lvl["F"], lvl["H"], lvl["W"])
+    if verbose:
+        print(f"  G5 invariance    : {'PASS' if g5['ok'] else 'FAIL'}"
+              f"  ({g5['accs']})")
+    if not g5["ok"]:
+        fails.append("invariance")
+
+    # ---- bake ----
+    cfg = LEVELS[tag]
+    np.savez_compressed(
+        _path(tag),
+        fmt=np.int64(LEVEL_FMT), version=np.int64(lvl["version"]),
+        X=lvl["X"], y=lvl["y"], imp=lvl["sur"].imp, syn=lvl["sur"].syn,
+        H=np.int64(lvl["H"]), W=np.int64(lvl["W"]), F=np.int64(lvl["F"]),
+        gated=np.bool_(lvl["gated"]), credits=np.int64(lvl["credits"]),
+        pairs=np.array(json.dumps(lvl["pairs"])),
+        name=np.array(cfg["name"]), hint=np.array(cfg["hint"]))
+    print(f"  baked {_path(tag)}  "
+          f"{'OK' if not fails else 'GATES FAILED: ' + ', '.join(fails)}")
+    return fails
+
+
+def verify(tag):
+    """Reload the npz and re-run the cheap gates against what was baked."""
+    lvl = load_level(tag)
+    assert int(np.asarray(lvl["version"])) == LEVELS[tag]["seed"], \
+        f"{tag}: baked version != LEVELS seed — bump or re-bake"
+    fails = []
+    if lvl["gated"]:
+        g = blindness_gate(lvl["sur"], lvl["F"], lvl["H"], lvl["W"],
+                           lvl["pairs"])
+        if not g["ok"]:
+            fails.append("blindness")
+        print(f"  [verify] {tag}: blindness z={g['z']:+.2f} "
+              f"{'OK' if not fails else 'FAIL'}")
+    g3 = level_sensitivity_gate(lvl)
+    if not g3["ok"]:
+        fails.append("sensitivity")
+    print(f"  [verify] {tag}: sensitivity d={g3['diff']['mean_diff']:+.3f} "
+          f"{'OK' if not fails else 'FAIL: ' + ', '.join(fails)}")
+    return fails
+
 
 if __name__ == "__main__":
-    X, y, pairs = make_game_data()                 # seed 42 — the shipped level
-    bake("pairs_16", X, y, pairs=pairs)
-    bake("xor_16", *make_xor_data()[:2])
-    make_icons()
-
-    # Gate A — scorer sensitivity, certified on the shipped XOR artifact
-    trX, trY, vaX, vaY, _ = load_level("xor_16")
-    a_adj  = accuracy(trX, trY, vaX, vaY, place_features({0: 0, 1: 1}), 4, 4)[0]
-    a_anti = accuracy(trX, trY, vaX, vaY, place_features({0: 0, 15: 1}), 4, 4)[0]
-    print(f"\nGate A (XOR):  adjacent {a_adj:.3f} vs scattered {a_anti:.3f} "
-          f"-> gap {a_adj - a_anti:+.3f}   [need >= 0.10]")
-    assert a_adj - a_anti >= 0.10, "scorer cannot see an adjacent XOR pair — do not ship"
-
-    # Gate B — the pairs level's skill gradient, certified on its own artifact
-    trX, trY, vaX, vaY, _ = load_level("pairs_16")
-    best, worst = domino_layouts(pairs)
-    a_best  = accuracy(trX, trY, vaX, vaY, best, 4, 4)[0]
-    a_worst = accuracy(trX, trY, vaX, vaY, worst, 4, 4)[0]
-    print(f"Gate B (pairs): domino {a_best:.3f} vs split {a_worst:.3f} "
-          f"-> gap {a_best - a_worst:+.3f}   [need >= 0.015]")
-    assert a_best - a_worst >= 0.015, "pairs level has no skill gradient — rebalance"
-    print("\nGATES PASS — assets certified to ship.")
+    mode = sys.argv[1] if len(sys.argv) > 1 else "bake"
+    all_fails = []
+    for tag in LEVEL_TAGS:
+        print(f"[{tag}]")
+        all_fails += verify(tag) if mode == "--verify" else bake(tag)
+    if all_fails:
+        print(f"\nGATE FAILURES: {all_fails}")
+        sys.exit(1)
+    print("\nAll gates passed.")
