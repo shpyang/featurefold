@@ -156,6 +156,7 @@ def oracle_fac(F, H, W, pairs):
     for i in range(H * W):
         if fac[i] < 0:
             fac[i] = next(rest)
+    _check_placement(fac, F)          # add this line
     return fac
 
 def _check_placement(fac, F):
